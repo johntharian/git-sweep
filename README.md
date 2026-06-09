@@ -50,11 +50,11 @@ messages and a tidy summary of exactly what happened and why.
 ## Install
 
 ```bash
-npm install -g git-sweep
+npm install -g @johntharian/git-sweep
 ```
 
-This installs a global `git-sweep` command. Run it from inside any Git
-repository.
+This installs a global `git-sweep` command (the command stays `git-sweep` even
+though the package is scoped). Run it from inside any Git repository.
 
 > **Requires Node.js 18 or newer.**
 

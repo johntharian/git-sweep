@@ -1,5 +1,5 @@
 {
-  "name": "git-sweep",
+  "name": "@johntharian/git-sweep",
   "version": "1.0.0",
   "description": "Clean up stale local Git branches — safely and interactively.",
   "type": "module",
