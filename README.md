@@ -23,6 +23,7 @@ messages and a tidy summary of exactly what happened and why.
   - [Example output](#example-output)
 - [How it works](#how-it-works)
 - [Stash protection](#stash-protection)
+- [Merged & remote-deleted branches](#merged--remote-deleted-branches)
 - [Output legend](#output-legend)
 - [Exit codes](#exit-codes)
 - [Project structure](#project-structure)
@@ -36,6 +37,12 @@ messages and a tidy summary of exactly what happened and why.
 
 - 🔍 Detects local branches with **no commits in the past N weeks** (default: 3,
   configurable with `--weeks`).
+- 🪂 Detects branches whose **remote was deleted** ("gone" upstream — the usual
+  state after a PR is merged and the branch auto-deleted). These are offered for
+  deletion regardless of age.
+- 🔀 Flags branches **already merged into the base branch** with a `[merged]`
+  tag (auto-detected base, overridable with `--base`). Merged-but-fresh branches
+  are shown for awareness but kept.
 - 🛟 **Skips any branch that owns a stash** — your work-in-progress is protected.
 - 🚫 **Never deletes the current branch** and skips protected branches
   (`main`, `master`, `develop` by default; extend with `--protect`).
@@ -61,11 +68,12 @@ though the package is scoped). Run it from inside any Git repository.
 ## Usage
 
 ```bash
-git-sweep                            # interactive checklist of stale branches
-git-sweep --dry-run                  # list stale branches, delete nothing
-git-sweep --force                    # skip confirmation, delete all stale branches
+git-sweep                            # interactive checklist of candidate branches
+git-sweep --dry-run                  # list candidates, delete nothing
+git-sweep --force                    # skip confirmation, delete all candidates
 git-sweep --weeks=4                  # use a 4-week inactivity threshold
 git-sweep --protect=release,staging  # protect extra branches by name
+git-sweep --base=develop             # check merges/gone against develop
 ```
 
 Flags can be combined, e.g. `git-sweep --weeks=6 --protect=release`.
@@ -74,24 +82,31 @@ Flags can be combined, e.g. `git-sweep --weeks=6 --protect=release`.
 
 | Flag                | Description                                                                                       |
 | ------------------- | ------------------------------------------------------------------------------------------------- |
-| `--dry-run`         | Preview stale branches without deleting anything.                                                 |
-| `--force`           | Skip the prompt and force-delete (`git branch -D`) all stale branches. Stashed branches are still skipped. |
+| `--dry-run`         | Preview candidate branches without deleting anything.                                             |
+| `--force`           | Skip the prompt and force-delete (`git branch -D`) all candidates. Stashed branches are still skipped. |
 | `--weeks=<n>`       | Inactivity threshold in weeks (default: `3`). Must be a non-negative integer.                     |
 | `--protect=<names>` | Comma-separated branch names to protect, **in addition to** the built-in `main`, `master`, `develop`. |
+| `--base=<branch>`   | Base branch to check "merged" and "gone" status against. Auto-detected (`origin/HEAD` → first of `main`/`master`/`develop`) when omitted. |
 | `-h, --help`        | Show usage.                                                                                       |
+
+A branch is offered for deletion when it is **stale OR its remote is gone**
+(while never touching the current, protected, or stashed branches). Being merged
+is informational only — it never, on its own, makes a branch a deletion target.
 
 ### Interactive mode (default)
 
 Running `git-sweep` with no flags opens a multi-select checklist:
 
 ```
-? Select stale branches to delete:
+? Select branches to delete:
  ◉ feature/old-login   (last commit: 28 days ago)
- ◉ spike/cache-poc     (last commit: 41 days ago)
+ ◉ spike/cache-poc     (last commit: 41 days ago) [merged]
+ ◉ feat/cart           (last commit: 3 days ago) [gone]
  ◯ wip/payments        (last commit: 22 days ago)  [has stash — skipped]
 ```
 
-Stale branches are **pre-checked**. Branches with a stash are shown but
+Candidate branches (stale or gone) are **pre-checked**, annotated with `[gone]`
+and `[merged]` tags where relevant. Branches with a stash are shown but
 **disabled**, so they can't be selected by accident. After you choose,
 `git-sweep` asks for a final confirmation before anything is deleted.
 
@@ -100,16 +115,19 @@ Stale branches are **pre-checked**. Branches with a stash are shown but
 A `--dry-run` against a repo with a mix of branches:
 
 ```
-✔ Scanned 6 local branches.
+✔ Scanned 6 local branches (base: main).
 
-Dry run — stale threshold: 3 weeks. Nothing will be deleted.
+Dry run — stale threshold: 3 weeks, base: main. Nothing will be deleted.
 
 Would delete (2):
-  🔴 stale-merged  (last commit: 50 days ago)
+  🔴 feat/cart  (last commit: 3 days ago) [gone]
   🔴 stale-old  (last commit: 45 days ago)
 
 Skipped — stash found (1):
   🟡 stale-stash  (last commit: 60 days ago) [has stash]
+
+Merged into main, but still fresh — kept (1):
+  ⚪ feat/login  (last commit: 4 days ago) [merged]
 
 Protected / current (2):
   ⚪ develop (protected)
@@ -121,10 +139,12 @@ The closing summary after a real run:
 ```
 ── Summary ──────────────────────────
 🟢 Deleted: 2
-   🔴 stale-merged
+   🔴 feat/cart
    🔴 stale-old
 🟡 Skipped — stash found: 1
    🟡 stale-stash
+⚪ Merged into main but kept (fresh): 1
+   ⚪ feat/login
 ⚪ Skipped — protected/current: 2
    ⚪ develop (protected)
    ⚪ main (current)
@@ -132,17 +152,24 @@ The closing summary after a real run:
 
 ## How it works
 
-1. **Scan.** With a single `git for-each-ref`, `git-sweep` reads every local
-   branch and the timestamp of its most recent commit.
-2. **Classify.** Each branch is flagged as current, protected, stashed, and/or
-   stale. A branch is *stale* when its last commit is at least `weeks × 7` days
-   old (the threshold is inclusive).
-3. **Bucket.** Branches are sorted by precedence into: protected/current
-   (always skipped) → fresh (left alone) → stale-with-stash (skipped) →
-   deletable.
-4. **Decide.** Depending on the flags, `git-sweep` previews (`--dry-run`),
+1. **Resolve the base & refresh.** The base branch is auto-detected from
+   `origin/HEAD` (falling back to the first of `main`/`master`/`develop`), or
+   taken from `--base`. If the repo has a remote, `git-sweep` runs
+   `git fetch --prune` so "gone" status is accurate — best-effort, so an
+   offline run just warns and continues with cached remote state.
+2. **Scan.** With a single `git for-each-ref`, `git-sweep` reads every local
+   branch, the timestamp of its most recent commit, and whether its upstream is
+   gone. A separate `git branch --merged <base>` marks merged branches.
+3. **Classify.** Each branch is flagged as current, protected, stashed, stale,
+   merged, and/or gone. A branch is *stale* when its last commit is at least
+   `weeks × 7` days old (inclusive). It's a deletion **candidate** when it is
+   *stale or gone*.
+4. **Bucket.** Branches are sorted by precedence into: protected/current
+   (always skipped) → not-a-candidate (left alone; merged-but-fresh shown for
+   awareness) → candidate-with-stash (skipped) → deletable.
+5. **Decide.** Depending on the flags, `git-sweep` previews (`--dry-run`),
    deletes everything eligible (`--force`), or opens the interactive checklist.
-5. **Delete & report.** Deletions run one at a time; a failure on one branch
+6. **Delete & report.** Deletions run one at a time; a failure on one branch
    (e.g. an unmerged branch under safe delete) is reported with a friendly
    reason and the sweep continues. A colored summary closes things out.
 
@@ -168,14 +195,42 @@ stale branch owns one or more stashes, it is **shown but never deleted**:
 
 This prevents you from losing uncommitted work that's parked in a stash.
 
+## Merged & remote-deleted branches
+
+`git-sweep` looks at two additional "this branch is done" signals, relative to
+the base branch (auto-detected, or set with `--base`):
+
+- **Merged** (`[merged]` tag) — the branch is already merged into the base
+  (`git branch --merged <base>`). This is **informational only**: a merged
+  branch is *not* deleted unless it's also stale or gone. Merged-but-fresh
+  branches are listed in a "kept" section so you can see them without risk.
+- **Gone** (`[gone]` tag) — the branch's upstream tracking branch no longer
+  exists, i.e. the remote branch was deleted (typically after a PR merge). Gone
+  branches **are** deletion candidates, regardless of how recent their last
+  commit is.
+
+To keep "gone" accurate, `git-sweep` runs `git fetch --prune` before scanning
+whenever the repo has a remote. This only refreshes remote-tracking refs (it
+never touches your local branches or working tree), and it runs in `--dry-run`
+too so the preview is truthful. With no remote, or when offline, the fetch is
+skipped/ignored and the scan proceeds with whatever state is cached locally.
+
+> **Note on squash/rebase merges.** A branch merged via *squash* or *rebase*
+> often shows as `[gone]` but is **not** recognized as merged by safe delete
+> (`git branch -d`), since its commits aren't ancestors of the base. Deleting it
+> will fail with *"not fully merged — re-run with --force"*; use `--force` to
+> remove it. `git-sweep` isolates such failures per-branch and keeps going.
+
 ## Output legend
 
-| Color        | Meaning                                                  |
+| Color / tag  | Meaning                                                  |
 | ------------ | -------------------------------------------------------- |
 | 🔴 Red       | Branch deleted                                           |
 | 🟡 Yellow    | Skipped because a stash was found (or a delete failed)   |
 | 🟢 Green     | Success summary                                          |
-| ⚪ Gray      | Skipped because it's protected or currently checked out  |
+| ⚪ Gray      | Skipped/kept — protected, current, or merged-but-fresh   |
+| `[merged]`   | Already merged into the base branch (informational)      |
+| `[gone]`     | Upstream was deleted on the remote (a deletion candidate)|
 
 ## Exit codes
 
@@ -193,7 +248,7 @@ git-sweep/
 ├── src/
 │   ├── index.js         # main orchestration logic
 │   ├── git.js           # all Git operations + pure output parsers (simple-git)
-│   ├── filter.js        # staleness + stash-check filtering (pure)
+│   ├── filter.js        # staleness / merged / gone / stash filtering (pure)
 │   └── ui.js            # chalk output helpers + inquirer prompts
 ├── test/
 │   ├── filter.test.js   # classify / partition logic

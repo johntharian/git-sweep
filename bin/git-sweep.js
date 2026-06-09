@@ -21,10 +21,11 @@ const toInt = (value) => {
 program
   .name('git-sweep')
   .description('Clean up stale local Git branches — safely and interactively.')
-  .option('--dry-run', 'list stale branches without deleting anything')
-  .option('--force', 'skip confirmation and force-delete all stale branches (git -D)')
+  .option('--dry-run', 'list candidate branches without deleting anything')
+  .option('--force', 'skip confirmation and force-delete all candidate branches (git -D)')
   .option('--weeks <n>', 'inactivity threshold in weeks', toInt, 3)
   .option('--protect <names>', 'comma-separated extra protected branch names', toList, [])
+  .option('--base <branch>', 'base branch to check merges/gone against (auto-detected by default)')
   .parse(process.argv);
 
 run(program.opts()).catch((err) => {

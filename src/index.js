@@ -24,6 +24,7 @@ export function friendlyReason(err) {
  * @param {boolean} [opts.force]
  * @param {number}  [opts.weeks]
  * @param {string[]} [opts.protect]
+ * @param {string}  [opts.base]  base branch for merged/gone checks (auto-detected)
  */
 export async function run(opts = {}) {
   const weeks = Number.isFinite(opts.weeks) ? opts.weeks : 3;
@@ -39,14 +40,32 @@ export async function run(opts = {}) {
     return;
   }
 
+  // Resolve the base branch used for "merged" and (indirectly) "gone" context.
+  const base = opts.base ?? (await git.getDefaultBranch());
+
+  // Refresh remote-tracking refs so "gone" status is accurate. Best-effort:
+  // skip when there's no remote, and keep going (with cached state) if offline.
+  let fetchFailed = false;
+  if (await git.hasRemotes()) {
+    spinner.text = 'Fetching remote state…';
+    try {
+      await git.fetchPrune();
+    } catch {
+      fetchFailed = true;
+    }
+    spinner.text = 'Scanning branches…';
+  }
+
   let currentBranch;
   let branches;
   let stashBranches;
+  let mergedBranches;
   try {
-    [currentBranch, branches, stashBranches] = await Promise.all([
+    [currentBranch, branches, stashBranches, mergedBranches] = await Promise.all([
       git.getCurrentBranch(),
       git.getLocalBranches(),
       git.getStashBranches(),
+      git.getMergedBranches(base),
     ]);
   } catch (err) {
     spinner.stop();
@@ -59,23 +78,32 @@ export async function run(opts = {}) {
     currentBranch,
     protectedBranches,
     stashBranches,
+    mergedBranches,
     thresholdDays,
   });
-  const { protectedOrCurrent, stashSkipped, deletable } = partition(classified);
+  const { protectedOrCurrent, fresh, stashSkipped, deletable } = partition(classified);
+
+  // Merged into base but not yet a deletion candidate — surfaced for awareness.
+  const mergedFresh = fresh.filter((b) => b.isMerged);
 
   spinner.succeed(
-    `Scanned ${branches.length} local branch${branches.length === 1 ? '' : 'es'}.`
+    `Scanned ${branches.length} local branch${branches.length === 1 ? '' : 'es'} (base: ${base}).`
   );
 
-  // Nothing stale at all (stashed-but-stale still counts as "something to report").
+  if (fetchFailed) {
+    ui.info("Couldn't reach the remote — using cached remote state for 'gone' status.");
+  }
+
+  // No deletion candidates (no stale or gone branches without stashes).
   if (deletable.length === 0 && stashSkipped.length === 0) {
     ui.allClean(weeks);
+    if (mergedFresh.length) ui.mergedFreshNotice(mergedFresh, base);
     return;
   }
 
   // Preview only.
   if (opts.dryRun) {
-    ui.dryRunReport({ deletable, stashSkipped, protectedOrCurrent, weeks });
+    ui.dryRunReport({ deletable, stashSkipped, protectedOrCurrent, mergedFresh, base, weeks });
     return;
   }
 
@@ -85,13 +113,13 @@ export async function run(opts = {}) {
   if (opts.force) {
     toDelete = deletable.map((b) => b.name);
     if (toDelete.length === 0) {
-      ui.info('The only stale branches have stashes — nothing to force-delete.');
+      ui.info('The only candidate branches have stashes — nothing to force-delete.');
     } else {
-      ui.info(`Force mode: deleting ${toDelete.length} stale branch(es) with git -D.`);
+      ui.info(`Force mode: deleting ${toDelete.length} branch(es) with git -D.`);
     }
   } else if (deletable.length === 0) {
-    // Interactive, but every stale branch is stash-protected.
-    ui.info('All stale branches have stashes and were skipped.');
+    // Interactive, but every candidate branch is stash-protected.
+    ui.info('All candidate branches have stashes and were skipped.');
     toDelete = [];
   } else {
     const selected = await ui.promptSelection(deletable, stashSkipped);
@@ -122,5 +150,5 @@ export async function run(opts = {}) {
     }
   }
 
-  ui.summary({ deleted, failed, stashSkipped, protectedOrCurrent });
+  ui.summary({ deleted, failed, stashSkipped, protectedOrCurrent, mergedFresh, base });
 }

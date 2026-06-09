@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { classifyBranches, partition } from '../src/filter.js';
 
 // A small helper to build branch records without repeating the shape everywhere.
-const branch = (name, daysAgo) => ({
+const branch = (name, daysAgo, { isGone = false } = {}) => ({
   name,
   lastCommit: new Date(),
   daysAgo,
+  isGone,
 });
 
 const ctx = (overrides = {}) => ({
@@ -128,5 +129,59 @@ test('partition: a stale branch with a stash is skipped, not deletable', () => {
   const { stashSkipped, deletable } = partition(classified);
 
   assert.deepEqual(stashSkipped.map((b) => b.name), ['feature-wip']);
+  assert.equal(deletable.length, 0);
+});
+
+test('classifyBranches: sets isMerged and passes isGone through', () => {
+  const branches = [
+    branch('feat/merged', 2),
+    branch('feat/gone', 2, { isGone: true }),
+    branch('feat/plain', 2),
+  ];
+  const result = classifyBranches(
+    branches,
+    ctx({ currentBranch: 'none', mergedBranches: ['feat/merged'] })
+  );
+  const byName = Object.fromEntries(result.map((b) => [b.name, b]));
+
+  assert.equal(byName['feat/merged'].isMerged, true);
+  assert.equal(byName['feat/merged'].isGone, false);
+  assert.equal(byName['feat/gone'].isGone, true);
+  assert.equal(byName['feat/gone'].isMerged, false);
+  assert.equal(byName['feat/plain'].isMerged, false);
+  assert.equal(byName['feat/plain'].isGone, false);
+});
+
+test('partition: a fresh GONE branch is a deletion candidate', () => {
+  const classified = classifyBranches(
+    [branch('feat/gone', 3, { isGone: true })],
+    ctx({ currentBranch: 'none' })
+  );
+  const { deletable, fresh } = partition(classified);
+
+  assert.deepEqual(deletable.map((b) => b.name), ['feat/gone']);
+  assert.equal(fresh.length, 0);
+});
+
+test('partition: a fresh MERGED (not gone) branch stays fresh, never deletable', () => {
+  const classified = classifyBranches(
+    [branch('feat/merged', 3)],
+    ctx({ currentBranch: 'none', mergedBranches: ['feat/merged'] })
+  );
+  const { deletable, fresh } = partition(classified);
+
+  assert.equal(deletable.length, 0, 'merged alone is not a deletion signal');
+  assert.deepEqual(fresh.map((b) => b.name), ['feat/merged']);
+  assert.equal(fresh[0].isMerged, true);
+});
+
+test('partition: a fresh gone branch with a stash is skipped, not deletable', () => {
+  const classified = classifyBranches(
+    [branch('feat/gone-wip', 3, { isGone: true })],
+    ctx({ currentBranch: 'none', stashBranches: ['feat/gone-wip'] })
+  );
+  const { stashSkipped, deletable } = partition(classified);
+
+  assert.deepEqual(stashSkipped.map((b) => b.name), ['feat/gone-wip']);
   assert.equal(deletable.length, 0);
 });

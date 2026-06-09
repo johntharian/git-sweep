@@ -11,9 +11,15 @@ const MS_PER_DAY = 1000 * 60 * 60 * 24;
  * Parse the output of our `for-each-ref` call into branch records.
  * Pure (no I/O) so it can be unit-tested directly.
  *
- * @param {string} raw    tab-separated "name\tISO-date" lines.
+ * Each line is tab-separated: "name\tISO-date\ttrack-info". The third field
+ * is git's `%(upstream:track)` — it reads `[gone]` when the branch's upstream
+ * (remote tracking branch) has been deleted, `[ahead 1, behind 2]` otherwise,
+ * or is empty when there's no upstream. The field is optional so older two-
+ * field input still parses (with `isGone === false`).
+ *
+ * @param {string} raw    tab-separated "name\tISO-date\ttrack-info" lines.
  * @param {number} nowMs  reference "now" in epoch ms (injected for determinism).
- * @returns {Array<{ name: string, lastCommit: Date, daysAgo: number }>}
+ * @returns {Array<{ name: string, lastCommit: Date, daysAgo: number, isGone: boolean }>}
  */
 export function parseBranchRefs(raw, nowMs = Date.now()) {
   return raw
@@ -21,11 +27,37 @@ export function parseBranchRefs(raw, nowMs = Date.now()) {
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const [name, dateStr] = line.split('\t');
+      const [name, dateStr, track = ''] = line.split('\t');
       const lastCommit = new Date(dateStr);
       const daysAgo = Math.floor((nowMs - lastCommit.getTime()) / MS_PER_DAY);
-      return { name, lastCommit, daysAgo };
+      const isGone = track.includes('gone');
+      return { name, lastCommit, daysAgo, isGone };
     });
+}
+
+/**
+ * Parse `git branch --merged <base> --format=%(refname:short)` output into a
+ * list of branch names. Pure (no I/O) so it can be unit-tested directly.
+ *
+ * @param {string} raw  newline-separated branch names.
+ * @returns {string[]}
+ */
+export function parseMergedBranches(raw) {
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Extract the short branch name from a symbolic ref like
+ * `refs/remotes/origin/main` -> `main`. Pure (no I/O).
+ *
+ * @param {string} ref
+ * @returns {string}
+ */
+export function parseDefaultBranchRef(ref) {
+  return ref.trim().split('/').pop();
 }
 
 /**
@@ -70,20 +102,78 @@ export async function getCurrentBranch() {
 }
 
 /**
- * List local branches with the timestamp of their last commit.
- * Uses a single `for-each-ref` call rather than N log calls.
+ * List local branches with the timestamp of their last commit and whether
+ * their upstream is gone. Uses a single `for-each-ref` call rather than N
+ * log calls.
  *
- * @returns {Promise<Array<{ name: string, lastCommit: Date, daysAgo: number }>>}
+ * @returns {Promise<Array<{ name: string, lastCommit: Date, daysAgo: number, isGone: boolean }>>}
  */
 export async function getLocalBranches() {
-  // %09 is a literal tab — a safe delimiter for branch names and ISO dates.
+  // %09 is a literal tab — a safe delimiter between name, date, and track info.
   const raw = await git.raw([
     'for-each-ref',
-    '--format=%(refname:short)%09%(committerdate:iso8601)',
+    '--format=%(refname:short)%09%(committerdate:iso8601)%09%(upstream:track)',
     'refs/heads/',
   ]);
 
   return parseBranchRefs(raw, Date.now());
+}
+
+/**
+ * List local branches already merged into the given base branch.
+ * Note: the base branch and current branch appear in this list (a branch is
+ * merged into itself) — callers treat that as harmless.
+ *
+ * @param {string} base
+ * @returns {Promise<string[]>}
+ */
+export async function getMergedBranches(base) {
+  const raw = await git.raw(['branch', '--merged', base, '--format=%(refname:short)']);
+  return parseMergedBranches(raw);
+}
+
+/**
+ * Best-effort detection of the repository's default/base branch.
+ * Tries the remote's HEAD pointer first, then falls back to the first of
+ * main/master/develop that exists locally, then 'main' as a last resort.
+ *
+ * @returns {Promise<string>}
+ */
+export async function getDefaultBranch() {
+  try {
+    const ref = await git.raw(['symbolic-ref', 'refs/remotes/origin/HEAD']);
+    const name = parseDefaultBranchRef(ref);
+    if (name) return name;
+  } catch {
+    // No remote HEAD configured — fall through to local heuristics.
+  }
+
+  const localNames = new Set((await getLocalBranches()).map((b) => b.name));
+  for (const candidate of ['main', 'master', 'develop']) {
+    if (localNames.has(candidate)) return candidate;
+  }
+  return 'main';
+}
+
+/**
+ * @returns {Promise<boolean>} true when the repo has at least one remote.
+ */
+export async function hasRemotes() {
+  try {
+    return (await git.getRemotes()).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Refresh remote-tracking refs and prune deleted ones so "gone" status is
+ * accurate. Lets the caller decide how to handle failures (e.g. offline).
+ *
+ * @returns {Promise<void>}
+ */
+export async function fetchPrune() {
+  await git.raw(['fetch', '--prune']);
 }
 
 /**

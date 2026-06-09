@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseBranchRefs, parseStashBranches } from '../src/git.js';
+import {
+  parseBranchRefs,
+  parseStashBranches,
+  parseMergedBranches,
+  parseDefaultBranchRef,
+} from '../src/git.js';
 
 const DAY = 1000 * 60 * 60 * 24;
 
@@ -48,6 +53,46 @@ test('parseBranchRefs: daysAgo floors partial days', () => {
   const raw = `b\t${new Date(now - DAY * 2.9).toISOString()}`;
   const [b] = parseBranchRefs(raw, now);
   assert.equal(b.daysAgo, 2, '2.9 days ago floors to 2');
+});
+
+test('parseBranchRefs: marks isGone when upstream track field is [gone]', () => {
+  const now = Date.parse('2026-06-09T00:00:00Z');
+  const raw = [
+    `feat/done\t2026-06-01T00:00:00Z\t[gone]`,
+    `feat/active\t2026-06-01T00:00:00Z\t[ahead 1, behind 2]`,
+    `feat/upstream\t2026-06-01T00:00:00Z\t`,
+  ].join('\n');
+
+  const byName = Object.fromEntries(parseBranchRefs(raw, now).map((b) => [b.name, b]));
+
+  assert.equal(byName['feat/done'].isGone, true);
+  assert.equal(byName['feat/active'].isGone, false);
+  assert.equal(byName['feat/upstream'].isGone, false);
+});
+
+test('parseBranchRefs: isGone defaults to false when track field is absent', () => {
+  const now = Date.parse('2026-06-09T00:00:00Z');
+  const [b] = parseBranchRefs(`main\t2026-06-09T00:00:00Z`, now);
+  assert.equal(b.isGone, false);
+});
+
+test('parseMergedBranches: splits, trims, and drops blanks', () => {
+  const raw = 'main\nfeat/cart\n  feat/login  \n\n';
+  assert.deepEqual(parseMergedBranches(raw), ['main', 'feat/cart', 'feat/login']);
+});
+
+test('parseMergedBranches: empty output yields an empty array', () => {
+  assert.deepEqual(parseMergedBranches(''), []);
+  assert.deepEqual(parseMergedBranches('\n  \n'), []);
+});
+
+test('parseDefaultBranchRef: extracts the short name from a symbolic ref', () => {
+  assert.equal(parseDefaultBranchRef('refs/remotes/origin/main'), 'main');
+  assert.equal(parseDefaultBranchRef('  refs/remotes/origin/develop\n'), 'develop');
+});
+
+test('parseDefaultBranchRef: handles branch names with slashes', () => {
+  assert.equal(parseDefaultBranchRef('refs/remotes/origin/release/v2'), 'v2');
 });
 
 test('parseStashBranches: parses the "WIP on <branch>:" format', () => {

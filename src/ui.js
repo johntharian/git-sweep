@@ -5,10 +5,35 @@ import inquirer from 'inquirer';
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-/** A consistent "name (last commit: X days ago)" label for a branch. */
+/** Intrinsic status tags shown after a branch line, e.g. " [merged] [gone]". */
+function tags(b) {
+  const t = [];
+  if (b.isMerged) t.push(chalk.cyan('[merged]'));
+  if (b.isGone) t.push(chalk.magenta('[gone]'));
+  return t.length ? ` ${t.join(' ')}` : '';
+}
+
+/** A consistent "name (last commit: X days ago) [tags]" label for a branch. */
 function branchLine(b) {
   const ago = `${b.daysAgo} day${b.daysAgo === 1 ? '' : 's'} ago`;
-  return `${b.name}  ${chalk.gray(`(last commit: ${ago})`)}`;
+  return `${b.name}  ${chalk.gray(`(last commit: ${ago})`)}${tags(b)}`;
+}
+
+/** Gray informational section listing branches merged into base but kept. */
+function mergedFreshSection(mergedFresh, base) {
+  if (!mergedFresh || !mergedFresh.length) return;
+  console.log(
+    chalk.gray.bold(
+      `\nMerged into ${base}, but still fresh — kept (${mergedFresh.length}):`
+    )
+  );
+  for (const b of mergedFresh) console.log(`  ${chalk.gray('⚪')} ${branchLine(b)}`);
+}
+
+/** Standalone merged-but-fresh notice, used when there's nothing to delete. */
+export function mergedFreshNotice(mergedFresh, base) {
+  mergedFreshSection(mergedFresh, base);
+  console.log();
 }
 
 export function error(message) {
@@ -28,10 +53,17 @@ export function allClean(weeks) {
 }
 
 /** dry-run / preview report — describes intent, deletes nothing. */
-export function dryRunReport({ deletable, stashSkipped, protectedOrCurrent, weeks }) {
+export function dryRunReport({
+  deletable,
+  stashSkipped,
+  protectedOrCurrent,
+  mergedFresh,
+  base,
+  weeks,
+}) {
   console.log(
     chalk.bold(
-      `\nDry run — stale threshold: ${plural(weeks, 'week')}. Nothing will be deleted.\n`
+      `\nDry run — stale threshold: ${plural(weeks, 'week')}, base: ${base}. Nothing will be deleted.\n`
     )
   );
 
@@ -48,6 +80,8 @@ export function dryRunReport({ deletable, stashSkipped, protectedOrCurrent, week
       console.log(`  ${chalk.yellow('🟡')} ${branchLine(b)} ${chalk.yellow('[has stash]')}`);
     }
   }
+
+  mergedFreshSection(mergedFresh, base);
 
   if (protectedOrCurrent.length) {
     console.log(chalk.gray.bold(`\nProtected / current (${protectedOrCurrent.length}):`));
@@ -86,7 +120,7 @@ export async function promptSelection(deletable, stashSkipped) {
     {
       type: 'checkbox',
       name: 'selected',
-      message: 'Select stale branches to delete:',
+      message: 'Select branches to delete:',
       choices,
       pageSize: 20,
     },
@@ -117,7 +151,7 @@ export function reportFailed(name, reason) {
 }
 
 /** Closing summary of everything that happened. */
-export function summary({ deleted, failed, stashSkipped, protectedOrCurrent }) {
+export function summary({ deleted, failed, stashSkipped, protectedOrCurrent, mergedFresh, base }) {
   console.log(chalk.green.bold('\n── Summary ──────────────────────────'));
 
   console.log(chalk.green(`🟢 Deleted: ${deleted.length}`));
@@ -133,6 +167,11 @@ export function summary({ deleted, failed, stashSkipped, protectedOrCurrent }) {
   if (stashSkipped.length) {
     console.log(chalk.yellow(`🟡 Skipped — stash found: ${stashSkipped.length}`));
     for (const b of stashSkipped) console.log(`   ${chalk.yellow('🟡')} ${b.name}`);
+  }
+
+  if (mergedFresh && mergedFresh.length) {
+    console.log(chalk.gray(`⚪ Merged into ${base} but kept (fresh): ${mergedFresh.length}`));
+    for (const b of mergedFresh) console.log(`   ${chalk.gray('⚪')} ${b.name}`);
   }
 
   if (protectedOrCurrent.length) {
