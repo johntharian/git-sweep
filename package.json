@@ -1,10 +1,10 @@
 {
   "name": "@johntharian/git-sweep",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Clean up stale local Git branches — safely and interactively.",
   "type": "module",
   "bin": {
-    "git-sweep": "./bin/git-sweep.js"
+    "git-sweep": "bin/git-sweep.js"
   },
   "files": [
     "bin",
